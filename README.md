@@ -38,36 +38,40 @@
 ## 🖼 Screenshots & Gallery
 
 ### Launcher / Splash
-![Launcher Splash](assets/screenshots/screenshot_2026-01-23_024035.png)
+![Launcher Splash](assets/screenshots/launcher.png)
 *Launcher splash and mode selector (launcher view)*
 
-### Intelligence Dashboard — Three-Panel Analysis
-![Intelligence Dashboard](assets/screenshots/intelligence_dashboard.png)
+### Intelligence Core — Three-Panel Analysis
+![Intelligence Core](assets/screenshots/intelligence_core.png)
 *Real-time intelligence analysis with threat detection and inspector*
 
 ### Radar Display — Active Scanning
-![Radar View](assets/screenshots/radar_view.png)
+![Radar Display](assets/screenshots/radar.png)
 *Cyberpunk radar interface with real-time scanning and blips*
 
 ### Radar Heatmap
 ![Radar Heatmap](assets/screenshots/radar_heatmap.png)
 *Signal strength heatmap visualization*
 
+### Networks — Smart Device Detection
+![Networks](assets/screenshots/networks.png)
+*IoT device identification with icons and vendor info*
+
 ### Hidden Networks — Classification
 ![Hidden Networks](assets/screenshots/hidden_networks.png)
 *Hidden network classification and cluster analysis*
-
-### Smart Device Detection
-![Smart Devices](assets/screenshots/smart_devices.png)
-*IoT device identification with icons and vendor info*
 
 ### Security Audit Report
 ![Security Audit](assets/screenshots/security_audit.png)
 *Built-in security audit output and findings*
 
-### Theme Gallery
-![Themes](assets/screenshots/themes.png)
-*Six cyberpunk themes: Neon Green, Cyan, Purple, Red, Pink, Pip-Boy*
+### Spectrogram
+![Spectrogram](assets/screenshots/spectrogram.png)
+*Signal spectrogram and waterfall visualization*
+
+### Statistics
+![Statistics](assets/screenshots/heatmap.png)
+*Network statistics and signal strength heatmap*
 
 ---
 
