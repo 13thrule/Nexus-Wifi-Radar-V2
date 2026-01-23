@@ -35,26 +35,39 @@
 ---
 
 ## � SCREENSHOTS & GALLERY
+## 🖼 Screenshots & Gallery
 
-### Intelligence Dashboard - Three-Panel Analysis
-![NEXUS Intelligence Dashboard](assets/screenshots/intelligence_dashboard.png)
-*Real-time intelligence analysis with threat detection, event feed, and detailed inspector*
+### Launcher / Splash
+![Launcher Splash](assets/screenshots/screenshot_2026-01-23_024035.png)
+*Launcher splash and mode selector (launcher view)*
 
-### Radar Display - Active Scanning
-![NEXUS Radar View](assets/screenshots/radar_view.png)
-*Cyberpunk radar interface with network visualization and real-time scanning*
+### Intelligence Dashboard — Three-Panel Analysis
+![Intelligence Dashboard](assets/screenshots/intelligence_dashboard.png)
+*Real-time intelligence analysis with threat detection and inspector*
 
-### Hidden Networks - Classification & Threat Analysis
-![Hidden Network Analysis](assets/screenshots/hidden_networks.png)
-*Advanced hidden network classification with IoT device detection*
+### Radar Display — Active Scanning
+![Radar View](assets/screenshots/radar_view.png)
+*Cyberpunk radar interface with real-time scanning and blips*
 
-### Smart Device Detection - IoT Identification
-![Smart Device Icons](assets/screenshots/smart_devices.png)
-*Automatic identification of Ring doorbells, cameras, smart home devices*
+### Radar Heatmap
+![Radar Heatmap](assets/screenshots/radar_heatmap.png)
+*Signal strength heatmap visualization*
 
-### Theme Showcase - 6 Cyberpunk Themes
-![Theme Gallery](assets/screenshots/themes.png)
-*Dynamic theme switching: Neon Green, Cyan, Purple, Red, Pink, Pip-Boy*
+### Hidden Networks — Classification
+![Hidden Networks](assets/screenshots/hidden_networks.png)
+*Hidden network classification and cluster analysis*
+
+### Smart Device Detection
+![Smart Devices](assets/screenshots/smart_devices.png)
+*IoT device identification with icons and vendor info*
+
+### Security Audit Report
+![Security Audit](assets/screenshots/security_audit.png)
+*Built-in security audit output and findings*
+
+### Theme Gallery
+![Themes](assets/screenshots/themes.png)
+*Six cyberpunk themes: Neon Green, Cyan, Purple, Red, Pink, Pip-Boy*
 
 ---
 
