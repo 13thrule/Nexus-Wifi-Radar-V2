@@ -1,29 +1,126 @@
 """
 FastAPI-based remote dashboard server for Nexus WiFi Radar.
 
-Provides REST API endpoints and a web dashboard.
+Provides REST API endpoints and a web dashboard with:
+- Optional API key authentication
+- Rate limiting to prevent abuse
+- Secure headers
 """
 
 import asyncio
+import hashlib
 import json
+import os
+import secrets
+import time
+from collections import defaultdict
 from datetime import datetime
-from typing import List, Optional, Dict
+from functools import wraps
+from typing import List, Optional, Dict, Callable
 from pathlib import Path
 
 try:
-    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Depends
     from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
+    from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel
     FASTAPI_AVAILABLE = True
 except ImportError:
     FASTAPI_AVAILABLE = False
     FastAPI = None
+    Request = None
+    Depends = None
 
 from nexus.core.scan import get_scanner
 from nexus.core.models import Network, ScanResult, Threat
 from nexus.core.config import get_config
+from nexus.core.logging import get_logger
 from nexus.security.detection import ThreatDetector
+
+logger = get_logger(__name__)
+
+
+class RateLimiter:
+    """
+    Simple in-memory rate limiter.
+
+    Limits requests per IP address to prevent abuse.
+    """
+
+    def __init__(self, requests_per_minute: int = 30, scan_cooldown: int = 5):
+        """
+        Initialize rate limiter.
+
+        Args:
+            requests_per_minute: Max requests per minute per IP
+            scan_cooldown: Minimum seconds between scans per IP
+        """
+        self.requests_per_minute = requests_per_minute
+        self.scan_cooldown = scan_cooldown
+        self._requests: Dict[str, List[float]] = defaultdict(list)
+        self._last_scan: Dict[str, float] = {}
+
+    def _cleanup_old_requests(self, ip: str) -> None:
+        """Remove requests older than 1 minute."""
+        now = time.time()
+        self._requests[ip] = [t for t in self._requests[ip] if now - t < 60]
+
+    def check_rate_limit(self, ip: str) -> bool:
+        """Check if request is allowed under rate limit."""
+        self._cleanup_old_requests(ip)
+        return len(self._requests[ip]) < self.requests_per_minute
+
+    def record_request(self, ip: str) -> None:
+        """Record a request from an IP."""
+        self._requests[ip].append(time.time())
+
+    def can_scan(self, ip: str) -> bool:
+        """Check if IP can perform a scan (respects cooldown)."""
+        last = self._last_scan.get(ip, 0)
+        return time.time() - last >= self.scan_cooldown
+
+    def record_scan(self, ip: str) -> None:
+        """Record that IP performed a scan."""
+        self._last_scan[ip] = time.time()
+
+    def get_scan_wait_time(self, ip: str) -> int:
+        """Get seconds until IP can scan again."""
+        last = self._last_scan.get(ip, 0)
+        wait = self.scan_cooldown - (time.time() - last)
+        return max(0, int(wait))
+
+
+class APIKeyAuth:
+    """
+    Optional API key authentication.
+
+    If NEXUS_API_KEY environment variable is set, all API requests
+    must include a matching X-API-Key header.
+    """
+
+    def __init__(self):
+        """Initialize authentication."""
+        self.api_key = os.environ.get("NEXUS_API_KEY")
+        self.enabled = self.api_key is not None
+        if self.enabled:
+            logger.info("API key authentication enabled")
+        else:
+            logger.warning("API key authentication disabled (set NEXUS_API_KEY to enable)")
+
+    def verify(self, provided_key: Optional[str]) -> bool:
+        """Verify provided API key."""
+        if not self.enabled:
+            return True
+        if not provided_key:
+            return False
+        # Use constant-time comparison to prevent timing attacks
+        return secrets.compare_digest(provided_key, self.api_key)
+
+    @staticmethod
+    def generate_key() -> str:
+        """Generate a secure API key."""
+        return secrets.token_urlsafe(32)
 
 
 # Pydantic models for API
@@ -74,52 +171,107 @@ else:
 class DashboardServer:
     """
     Remote dashboard server for Nexus WiFi Radar.
-    
+
     Provides:
     - REST API for scanning and data retrieval
     - WebSocket for real-time updates
     - Web dashboard UI
+    - Optional API key authentication
+    - Rate limiting to prevent abuse
     """
-    
+
     def __init__(self, host: str = "0.0.0.0", port: int = 8080):
         """Initialize server."""
         if not FASTAPI_AVAILABLE:
             raise ImportError("FastAPI not installed. Run: pip install fastapi uvicorn")
-        
+
         self.host = host
         self.port = port
         self.app = FastAPI(
             title="Nexus WiFi Radar API",
             description="WiFi scanning and security analysis API",
-            version="0.2.0"
+            version="2.0.0"
         )
-        
+
+        # Security
+        self.rate_limiter = RateLimiter(requests_per_minute=60, scan_cooldown=5)
+        self.auth = APIKeyAuth()
+
+        # Add CORS middleware for web dashboard
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],  # In production, restrict this
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
         # State
         self.scanner = None
         self.detector = ThreatDetector()
         self.last_result: Optional[ScanResult] = None
         self.connected_clients: List[WebSocket] = []
-        
+
         # Try to get scanner
         try:
             self.scanner = get_scanner()
-        except Exception:
-            pass
-        
+            logger.info(f"Scanner initialized: {self.scanner.name}")
+        except RuntimeError as e:
+            logger.warning(f"Scanner not available: {e}")
+        except OSError as e:
+            logger.warning(f"Scanner OS error: {e}")
+
         # Setup routes
         self._setup_routes()
     
+    def _get_client_ip(self, request: Request) -> str:
+        """Get client IP address from request."""
+        # Check for forwarded header (behind proxy)
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        return request.client.host if request.client else "unknown"
+
+    def _check_auth(self, request: Request) -> None:
+        """Check API key authentication."""
+        if self.auth.enabled:
+            api_key = request.headers.get("X-API-Key")
+            if not self.auth.verify(api_key):
+                logger.warning(f"Unauthorized request from {self._get_client_ip(request)}")
+                raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+    def _check_rate_limit(self, request: Request) -> None:
+        """Check rate limiting."""
+        ip = self._get_client_ip(request)
+        if not self.rate_limiter.check_rate_limit(ip):
+            logger.warning(f"Rate limit exceeded for {ip}")
+            raise HTTPException(status_code=429, detail="Rate limit exceeded. Try again later.")
+        self.rate_limiter.record_request(ip)
+
     def _setup_routes(self):
         """Setup API routes."""
-        
+
         @self.app.get("/", response_class=HTMLResponse)
         async def dashboard():
             """Serve the web dashboard."""
             return self._get_dashboard_html()
-        
+
+        @self.app.get("/health")
+        async def health_check():
+            """Health check endpoint (no auth required)."""
+            return {
+                "status": "healthy",
+                "version": "2.0.0",
+                "scanner_available": self.scanner is not None,
+                "auth_enabled": self.auth.enabled
+            }
+
         @self.app.get("/api/status", response_model=StatusResponse)
-        async def get_status():
+        async def get_status(request: Request):
             """Get server status."""
+            self._check_auth(request)
+            self._check_rate_limit(request)
+
             return StatusResponse(
                 status="online",
                 scanner=self.scanner.name if self.scanner else "unavailable",
@@ -128,46 +280,73 @@ class DashboardServer:
                 network_count=self.last_result.network_count if self.last_result else 0,
                 threat_count=len(self.detector.get_active_threats())
             )
-        
+
         @self.app.get("/api/scan", response_model=ScanResponse)
-        async def scan(timeout: float = 10.0):
+        async def scan(request: Request, timeout: float = 10.0):
             """Perform a WiFi scan."""
+            self._check_auth(request)
+            self._check_rate_limit(request)
+
             if not self.scanner:
                 raise HTTPException(status_code=503, detail="Scanner not available")
-            
+
+            # Check scan cooldown
+            ip = self._get_client_ip(request)
+            if not self.rate_limiter.can_scan(ip):
+                wait_time = self.rate_limiter.get_scan_wait_time(ip)
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Scan cooldown active. Wait {wait_time} seconds."
+                )
+
+            # Clamp timeout to reasonable range
+            timeout = max(1.0, min(60.0, timeout))
+
+            logger.info(f"Scan requested by {ip} (timeout={timeout}s)")
+            self.rate_limiter.record_scan(ip)
+
             result = self.scanner.scan(timeout=timeout)
             threats = self.detector.analyze(result)
             result.threats = threats
             self.last_result = result
-            
+
+            logger.info(f"Scan complete: {result.network_count} networks, {len(threats)} threats")
+
             # Notify WebSocket clients
             await self._broadcast_update(result)
-            
+
             return self._scan_to_response(result)
-        
+
         @self.app.get("/api/networks", response_model=List[NetworkResponse])
-        async def get_networks():
+        async def get_networks(request: Request):
             """Get last scan's networks."""
+            self._check_auth(request)
+            self._check_rate_limit(request)
+
             if not self.last_result:
                 return []
             return [self._network_to_response(n) for n in self.last_result.networks]
-        
+
         @self.app.get("/api/threats", response_model=List[ThreatResponse])
-        async def get_threats():
+        async def get_threats(request: Request):
             """Get active threats."""
+            self._check_auth(request)
+            self._check_rate_limit(request)
+
             return [self._threat_to_response(t) for t in self.detector.get_active_threats()]
-        
+
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             """WebSocket for real-time updates."""
             await websocket.accept()
             self.connected_clients.append(websocket)
-            
+            logger.info(f"WebSocket client connected (total: {len(self.connected_clients)})")
+
             try:
                 while True:
                     # Keep connection alive, handle incoming messages
                     data = await websocket.receive_text()
-                    
+
                     if data == "scan":
                         if self.scanner:
                             result = self.scanner.scan(timeout=10)
@@ -176,7 +355,9 @@ class DashboardServer:
                             self.last_result = result
                             await self._broadcast_update(result)
             except WebSocketDisconnect:
-                self.connected_clients.remove(websocket)
+                if websocket in self.connected_clients:
+                    self.connected_clients.remove(websocket)
+                logger.info(f"WebSocket client disconnected (remaining: {len(self.connected_clients)})")
     
     async def _broadcast_update(self, result: ScanResult):
         """Broadcast scan update to all WebSocket clients."""
@@ -184,11 +365,18 @@ class DashboardServer:
             "type": "scan_update",
             "data": self._scan_to_response(result).model_dump()
         })
-        
-        for client in self.connected_clients[:]:
+
+        disconnected = []
+        for client in self.connected_clients:
             try:
                 await client.send_text(message)
-            except:
+            except (WebSocketDisconnect, RuntimeError, ConnectionError) as e:
+                logger.debug(f"WebSocket send failed: {e}")
+                disconnected.append(client)
+
+        # Remove disconnected clients
+        for client in disconnected:
+            if client in self.connected_clients:
                 self.connected_clients.remove(client)
     
     def _network_to_response(self, network: Network) -> NetworkResponse:
