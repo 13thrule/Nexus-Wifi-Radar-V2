@@ -219,8 +219,12 @@ class NexusLauncher:
             from nexus.core.scan import get_scanner
             scanner = get_scanner()
             self.system_info["scanner"] = scanner.name
-        except Exception as e:
+        except ImportError as e:
+            self.system_info["scanner"] = f"Import error: {str(e)[:15]}"
+        except RuntimeError as e:
             self.system_info["scanner"] = f"Error: {str(e)[:20]}"
+        except OSError as e:
+            self.system_info["scanner"] = f"OS error: {str(e)[:15]}"
     
     def _detect_scapy(self):
         """Detect Scapy availability."""
@@ -399,25 +403,33 @@ class NexusLauncher:
         """Launch the main radar GUI."""
         self.boot_status.config(text="[LAUNCHING] Radar GUI...", fg=self.theme["accent2"])
         self.root.update()
-        
+
         # Hide launcher and start radar
         self.root.withdraw()
-        
+
         try:
             from nexus.app import NexusApp
             app = NexusApp()
-            
+
             # When radar closes, show launcher again
             def on_radar_close():
                 app.root.destroy()
                 self.root.deiconify()
                 self.boot_status.config(text="[READY] Select a module to launch", fg=self.theme["accent"])
-            
+
             app.root.protocol("WM_DELETE_WINDOW", on_radar_close)
             app.run()
-        except Exception as e:
+        except ImportError as e:
             self.root.deiconify()
-            messagebox.showerror("Launch Error", f"Failed to launch Radar:\n{e}")
+            messagebox.showerror("Launch Error", f"Missing dependency:\n{e}")
+            self.boot_status.config(text="[ERROR] Missing dependency", fg=self.theme["error"])
+        except tk.TclError as e:
+            self.root.deiconify()
+            messagebox.showerror("Launch Error", f"GUI error:\n{e}")
+            self.boot_status.config(text="[ERROR] GUI initialization failed", fg=self.theme["error"])
+        except RuntimeError as e:
+            self.root.deiconify()
+            messagebox.showerror("Launch Error", f"Runtime error:\n{e}")
             self.boot_status.config(text="[ERROR] Launch failed", fg=self.theme["error"])
     
     def _launch_intelligence(self):
@@ -428,42 +440,72 @@ class NexusLauncher:
     def _launch_cli(self):
         """Launch CLI scan in new terminal."""
         self.boot_status.config(text="[LAUNCHING] CLI Scan...", fg=self.theme["accent2"])
-        
+
         try:
+            project_root = Path(__file__).parent.parent
             if platform.system() == "Windows":
                 # Open new PowerShell window with scan command
-                cmd = 'start powershell -NoExit -Command "cd \'{}\'; .\\venv\\Scripts\\python.exe -m nexus scan --weak -v"'.format(
-                    Path(__file__).parent.parent
+                # Use list form to avoid shell injection vulnerabilities
+                venv_python = project_root / "venv" / "Scripts" / "python.exe"
+                subprocess.Popen(
+                    ["powershell", "-NoExit", "-Command",
+                     f"cd '{project_root}'; & '{venv_python}' -m nexus scan --weak -v"],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE
                 )
-                subprocess.Popen(cmd, shell=True)
             else:
-                # Linux/Mac
-                subprocess.Popen(["python3", "-m", "nexus", "scan", "--weak", "-v"])
-            
+                # Linux/Mac - launch in new terminal if available
+                if self._has_command("gnome-terminal"):
+                    subprocess.Popen(["gnome-terminal", "--", "python3", "-m", "nexus", "scan", "--weak", "-v"],
+                                   cwd=str(project_root))
+                elif self._has_command("xterm"):
+                    subprocess.Popen(["xterm", "-e", "python3 -m nexus scan --weak -v"],
+                                   cwd=str(project_root))
+                else:
+                    subprocess.Popen(["python3", "-m", "nexus", "scan", "--weak", "-v"],
+                                   cwd=str(project_root))
+
             self.boot_status.config(text="[READY] CLI launched in new terminal", fg=self.theme["accent"])
-        except Exception as e:
+        except FileNotFoundError as e:
+            messagebox.showerror("Launch Error", f"Required executable not found:\n{e}")
+        except PermissionError as e:
+            messagebox.showerror("Launch Error", f"Permission denied:\n{e}")
+        except OSError as e:
             messagebox.showerror("Launch Error", f"Failed to launch CLI:\n{e}")
     
     def _launch_server(self):
         """Launch web dashboard server."""
         self.boot_status.config(text="[LAUNCHING] Web Dashboard...", fg=self.theme["accent2"])
-        
+
         try:
+            project_root = Path(__file__).parent.parent
             if platform.system() == "Windows":
-                cmd = 'start powershell -NoExit -Command "cd \'{}\'; .\\venv\\Scripts\\python.exe -m nexus server --port 8080"'.format(
-                    Path(__file__).parent.parent
+                # Use list form to avoid shell injection vulnerabilities
+                venv_python = project_root / "venv" / "Scripts" / "python.exe"
+                subprocess.Popen(
+                    ["powershell", "-NoExit", "-Command",
+                     f"cd '{project_root}'; & '{venv_python}' -m nexus server --port 8080"],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE
                 )
-                subprocess.Popen(cmd, shell=True)
             else:
-                subprocess.Popen(["python3", "-m", "nexus", "server", "--port", "8080"])
-            
+                subprocess.Popen(["python3", "-m", "nexus", "server", "--port", "8080"],
+                               cwd=str(project_root))
+
             self.boot_status.config(text="[READY] Dashboard at http://localhost:8080", fg=self.theme["accent"])
-            
+
             # Open browser after short delay
             self.root.after(2000, lambda: self._open_browser("http://localhost:8080"))
-        except Exception as e:
+        except FileNotFoundError as e:
+            messagebox.showerror("Launch Error", f"Required executable not found:\n{e}")
+        except PermissionError as e:
+            messagebox.showerror("Launch Error", f"Permission denied:\n{e}")
+        except OSError as e:
             messagebox.showerror("Launch Error", f"Failed to launch server:\n{e}")
     
+    def _has_command(self, cmd: str) -> bool:
+        """Check if a command is available on the system."""
+        import shutil
+        return shutil.which(cmd) is not None
+
     def _open_browser(self, url: str):
         """Open URL in default browser."""
         import webbrowser

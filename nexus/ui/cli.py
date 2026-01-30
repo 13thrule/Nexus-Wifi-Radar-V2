@@ -5,15 +5,98 @@ Provides CLI commands for scanning, viewing, and exporting WiFi data.
 """
 
 import argparse
+import logging
 import sys
 import json
 import time
+import re
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Optional, List
 
 from nexus.core.scan import get_scanner, get_available_scanners
 from nexus.core.config import Config, get_config
-from nexus.core.models import ScanResult
+from nexus.core.models import ScanResult, Network
+from nexus.core.logging import configure_logging, get_logger
+
+logger = get_logger(__name__)
+
+
+def _filter_networks(networks: List[Network], filter_pattern: Optional[str],
+                     min_signal: int = -90, band: Optional[str] = None,
+                     security: Optional[str] = None) -> List[Network]:
+    """
+    Filter networks based on various criteria.
+
+    Args:
+        networks: List of networks to filter
+        filter_pattern: Regex pattern to match SSID or BSSID
+        min_signal: Minimum signal strength in dBm
+        band: Filter by band ("2.4" or "5")
+        security: Filter by security type
+
+    Returns:
+        Filtered list of networks
+    """
+    filtered = networks
+
+    # Filter by signal strength
+    if min_signal > -90:
+        filtered = [n for n in filtered if n.rssi_dbm >= min_signal]
+
+    # Filter by regex pattern (matches SSID or BSSID)
+    if filter_pattern:
+        try:
+            pattern = re.compile(filter_pattern, re.IGNORECASE)
+            filtered = [n for n in filtered
+                       if pattern.search(n.ssid) or pattern.search(n.bssid)]
+        except re.error as e:
+            logger.warning(f"Invalid filter pattern '{filter_pattern}': {e}")
+
+    # Filter by band
+    if band:
+        if band == "2.4":
+            filtered = [n for n in filtered if n.frequency_mhz < 3000]
+        elif band == "5":
+            filtered = [n for n in filtered if n.frequency_mhz >= 5000]
+
+    # Filter by security type
+    if security:
+        security_upper = security.upper()
+        filtered = [n for n in filtered if security_upper in n.security.value.upper()]
+
+    return filtered
+
+
+def _write_output(result: ScanResult, output_path: str, format_type: str) -> bool:
+    """
+    Write scan results to a file.
+
+    Args:
+        result: Scan result to write
+        output_path: Path to output file
+        format_type: Output format (json, csv, html)
+
+    Returns:
+        True if successful
+    """
+    try:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        if format_type == "json":
+            content = result.to_json()
+        elif format_type == "csv":
+            content = result.to_csv()
+        else:
+            content = result.to_json()  # Default to JSON
+
+        path.write_text(content, encoding="utf-8")
+        logger.info(f"Results written to {output_path}")
+        return True
+    except IOError as e:
+        logger.error(f"Failed to write output file: {e}")
+        return False
 
 
 def cmd_scan(args) -> int:
@@ -21,35 +104,59 @@ def cmd_scan(args) -> int:
     try:
         scanner = get_scanner(prefer_scapy=not args.no_scapy)
     except RuntimeError as e:
+        logger.error(f"Scanner error: {e}")
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    
+
     # Extended scan mode for weak signals
     timeout = args.timeout
     if hasattr(args, 'weak') and args.weak:
         timeout = max(timeout, 30.0)  # Minimum 30s for extended scan
         print(f"[EXTENDED SCAN MODE] Scanning for weak signals...")
-    
+
     print(f"Using scanner: {scanner.name}")
     print(f"Scanning for {timeout} seconds...\n")
-    
+
     result = scanner.scan(timeout=timeout)
-    
-    # Filter by minimum signal strength
-    min_signal = getattr(args, 'min_signal', -90)
-    if min_signal > -90:
-        original_count = len(result.networks)
-        result.networks = [n for n in result.networks if n.rssi_dbm >= min_signal]
-        if original_count != len(result.networks):
-            print(f"Filtered {original_count - len(result.networks)} networks below {min_signal} dBm\n")
-    
+
+    # Apply filters
+    original_count = len(result.networks)
+    result.networks = _filter_networks(
+        result.networks,
+        filter_pattern=getattr(args, 'filter', None),
+        min_signal=getattr(args, 'min_signal', -90),
+        band=getattr(args, 'band', None),
+        security=getattr(args, 'security', None)
+    )
+
+    if original_count != len(result.networks):
+        print(f"Filtered: showing {len(result.networks)} of {original_count} networks\n")
+
+    # Output handling
+    output_file = getattr(args, 'output', None)
+
+    if output_file:
+        # Determine format from extension or flag
+        if args.json or output_file.endswith('.json'):
+            format_type = "json"
+        elif args.csv or output_file.endswith('.csv'):
+            format_type = "csv"
+        else:
+            format_type = "json"
+
+        if _write_output(result, output_file, format_type):
+            print(f"Results saved to: {output_file}")
+        else:
+            print(f"Warning: Failed to save results to {output_file}", file=sys.stderr)
+
+    # Console output
     if args.json:
         print(result.to_json())
     elif args.csv:
         print(result.to_csv())
     else:
         _print_scan_result(result, verbose=args.verbose, highlight_weak=getattr(args, 'weak', False))
-    
+
     return 0
 
 
@@ -235,11 +342,19 @@ def main(argv: Optional[list] = None) -> int:
         description="Nexus WiFi Radar - WiFi scanner and security analyzer"
     )
     parser.add_argument(
-        "--version", action="version", version="%(prog)s 0.2.0"
+        "--version", action="version", version="%(prog)s 2.0.0"
     )
-    
+    parser.add_argument(
+        "--log-file", metavar="PATH",
+        help="Write logs to file"
+    )
+    parser.add_argument(
+        "--log-level", choices=["debug", "info", "warning", "error"],
+        default="info", help="Set log level (default: info)"
+    )
+
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-    
+
     # scan command
     scan_parser = subparsers.add_parser("scan", help="Perform a WiFi scan")
     scan_parser.add_argument(
@@ -249,6 +364,10 @@ def main(argv: Optional[list] = None) -> int:
     scan_parser.add_argument(
         "-v", "--verbose", action="store_true",
         help="Show detailed output"
+    )
+    scan_parser.add_argument(
+        "-o", "--output", metavar="FILE",
+        help="Save results to file (format auto-detected from extension)"
     )
     scan_parser.add_argument(
         "--json", action="store_true",
@@ -269,6 +388,18 @@ def main(argv: Optional[list] = None) -> int:
     scan_parser.add_argument(
         "--min-signal", type=int, default=-90,
         help="Minimum signal strength in dBm to display (default: -90)"
+    )
+    scan_parser.add_argument(
+        "-f", "--filter", metavar="PATTERN",
+        help="Filter networks by SSID or BSSID (regex pattern)"
+    )
+    scan_parser.add_argument(
+        "--band", choices=["2.4", "5"],
+        help="Filter by frequency band"
+    )
+    scan_parser.add_argument(
+        "--security", metavar="TYPE",
+        help="Filter by security type (e.g., WPA2, WPA3, OPEN)"
     )
     scan_parser.set_defaults(func=cmd_scan)
     
@@ -334,11 +465,21 @@ def main(argv: Optional[list] = None) -> int:
     
     # Parse arguments
     args = parser.parse_args(argv)
-    
+
+    # Configure logging
+    log_levels = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "error": logging.ERROR
+    }
+    log_level = log_levels.get(args.log_level, logging.INFO)
+    configure_logging(level=log_level, log_file=args.log_file)
+
     if args.command is None:
         parser.print_help()
         return 0
-    
+
     return args.func(args)
 
 

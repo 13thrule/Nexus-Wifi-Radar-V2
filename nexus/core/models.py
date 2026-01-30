@@ -13,6 +13,11 @@ from enum import Enum
 from typing import List, Optional
 import json
 
+# Import centralized signal utilities
+from nexus.core.signal import (
+    rssi_to_percent, get_signal_quality_str, is_weak_signal
+)
+
 
 class SecurityType(Enum):
     """WiFi security/encryption types."""
@@ -48,7 +53,7 @@ class ThreatCategory(Enum):
 class Network:
     """
     Represents a discovered WiFi network.
-    
+
     Attributes:
         ssid: Network name (may be empty for hidden networks)
         bssid: MAC address of the access point
@@ -67,27 +72,23 @@ class Network:
     security: SecurityType = SecurityType.UNKNOWN
     vendor: str = "Unknown"
     last_seen: datetime = field(default_factory=datetime.now)
-    
+
     @property
     def signal_percent(self) -> int:
         """Convert RSSI dBm to percentage (0-100)."""
-        # Typical range: -30 dBm (excellent) to -90 dBm (unusable)
-        # Clamp to reasonable range
-        rssi = max(-90, min(-30, self.rssi_dbm))
-        return int((rssi + 90) * 100 / 60)
-    
+        # Use centralized signal calculation for consistency
+        return rssi_to_percent(self.rssi_dbm)
+
     @property
     def signal_quality(self) -> str:
         """Get human-readable signal quality."""
-        pct = self.signal_percent
-        if pct >= 80:
-            return "Excellent"
-        elif pct >= 60:
-            return "Good"
-        elif pct >= 40:
-            return "Fair"
-        else:
-            return "Weak"
+        # Use centralized signal quality for consistency
+        return get_signal_quality_str(self.rssi_dbm)
+
+    @property
+    def is_weak(self) -> bool:
+        """Check if this network has a weak signal."""
+        return is_weak_signal(self.rssi_dbm)
     
     @property
     def band(self) -> str:
