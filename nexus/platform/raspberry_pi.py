@@ -15,6 +15,9 @@ from typing import List, Optional
 from nexus.core.scan import Scanner
 from nexus.core.models import Network, ScanResult, SecurityType
 from nexus.core.vendor import lookup_vendor
+from nexus.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class PiScanner(Scanner):
@@ -172,10 +175,10 @@ class PiScanner(Scanner):
                         continue
         
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-            print(f"wpa_cli scan error: {e}")
-        
+            logger.error(f"wpa_cli scan error: {e}")
+
         return networks
-    
+
     def _scan_iwlist(self) -> List[Network]:
         """Scan using iwlist as fallback."""
         networks = []
@@ -237,10 +240,10 @@ class PiScanner(Scanner):
                 networks.append(self._create_network_from_dict(current_network))
         
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-            print(f"iwlist scan error: {e}")
-        
+            logger.error(f"iwlist scan error: {e}")
+
         return networks
-    
+
     def _create_network_from_dict(self, data: dict) -> Network:
         """Create Network from parsed dictionary."""
         channel = data.get("channel", 0)

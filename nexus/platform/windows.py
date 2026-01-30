@@ -26,6 +26,9 @@ from queue import Queue, Empty
 from nexus.core.scan import Scanner
 from nexus.core.models import Network, ScanResult, SecurityType
 from nexus.core.vendor import lookup_vendor
+from nexus.core.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def _detect_builtin_wifi_adapter() -> Optional[str]:
@@ -84,9 +87,9 @@ $adapters | ConvertTo-Json -Compress
             if adapters:
                 return adapters[0]['name']
     
-    except Exception as e:
-        print(f"[Scanner] WiFi adapter detection failed: {e}")
-    
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
+        logger.warning(f"WiFi adapter detection failed: {e}")
+
     return None
 
 
@@ -500,11 +503,11 @@ class WindowsScanner(Scanner):
         self._interface_name = detected_adapter or "Wi-Fi"  # Use detected or default
         
         if detected_adapter:
-            print(f"[Scanner] Detected WiFi adapter: {detected_adapter}")
-        
+            logger.info(f"Detected WiFi adapter: {detected_adapter}")
+
         # Log scanner mode
-        print("[Scanner] Using netsh mode (reliable, always passive)")
-        print("[Scanner] EASM (packet injection) disabled on Windows - use Linux for active scanning")
+        logger.info("Using netsh mode (reliable, always passive)")
+        logger.info("EASM (packet injection) disabled on Windows - use Linux for active scanning")
     
     def _quick_scapy_check(self) -> bool:
         """Quick check if Scapy is importable (no network operations)."""
@@ -518,27 +521,27 @@ class WindowsScanner(Scanner):
         """Run full Scapy diagnostics (with timeout protection)."""
         if self._scapy_diagnostics is not None:
             return self._scapy_diagnostics
-        
-        print("[Scanner] Running Scapy diagnostics...")
+
+        logger.info("Running Scapy diagnostics...")
         diag = ScapyDiagnostics()
         self._scapy_diagnostics = diag.run_diagnostics(timeout=5.0)
-        
+
         # Log results
         d = self._scapy_diagnostics
-        print(f"[Scanner] Scapy available: {d['scapy_available']}")
-        print(f"[Scanner] Npcap installed: {d['npcap_installed']}")
-        print(f"[Scanner] Adapters found: {len(d['adapters'])}")
-        
+        logger.info(f"Scapy available: {d['scapy_available']}")
+        logger.info(f"Npcap installed: {d['npcap_installed']}")
+        logger.info(f"Adapters found: {len(d['adapters'])}")
+
         if d['selected_adapter']:
-            print(f"[Scanner] Selected adapter: {d['selected_adapter']['description']}")
+            logger.info(f"Selected adapter: {d['selected_adapter']['description']}")
             self._interface_name = d['selected_adapter'].get('name', 'Wi-Fi')
-        
+
         if d['errors']:
             for err in d['errors']:
-                print(f"[Scanner] Diagnostic warning: {err}")
-        
-        print(f"[Scanner] Can sniff: {d['can_sniff']}")
-        
+                logger.warning(f"Diagnostic warning: {err}")
+
+        logger.info(f"Can sniff: {d['can_sniff']}")
+
         return self._scapy_diagnostics
     
     def _init_scapy_sniffer(self) -> bool:
@@ -550,7 +553,7 @@ class WindowsScanner(Scanner):
         diag = self._run_scapy_diagnostics()
         
         if not diag['can_sniff']:
-            print("[Scanner] Cannot initialize Scapy sniffer - diagnostics failed")
+            logger.warning("Cannot initialize Scapy sniffer - diagnostics failed")
             return False
         
         # Create sniffer with detected interface
@@ -565,11 +568,11 @@ class WindowsScanner(Scanner):
         
         # Try to initialize
         if not self._scapy_sniffer.initialize(timeout=5.0):
-            print(f"[Scanner] Scapy sniffer init failed: {self._scapy_sniffer.get_error()}")
+            logger.error(f"Scapy sniffer init failed: {self._scapy_sniffer.get_error()}")
             self._scapy_sniffer = None
             return False
-        
-        print("[Scanner] Scapy sniffer ready")
+
+        logger.info("Scapy sniffer ready")
         return True
     
     @property
@@ -583,10 +586,10 @@ class WindowsScanner(Scanner):
         if value:
             # Scapy packet injection doesn't work reliably on Windows with USB WiFi adapters
             # This is a known Scapy limitation — sniff() and sendp() hang or fail
-            print("[EASM] Cannot enable on Windows - Scapy packet injection not supported with USB adapters")
+            logger.info("EASM cannot enable on Windows - Scapy packet injection not supported with USB adapters")
             self._easm_enabled = False
             return
-        
+
         self._easm_enabled = False
         if self._easm_controller:
             self._stop_easm()
@@ -595,7 +598,7 @@ class WindowsScanner(Scanner):
         """Initialize EASM controller (lazy - actual init happens on first scan)."""
         # Just mark as pending - actual init happens in scan thread
         self._easm_pending = True
-        print("[EASM] Enhanced Active Scan Mode ARMED (will initialize on next scan)")
+        logger.info("EASM Enhanced Active Scan Mode ARMED (will initialize on next scan)")
     
     def _init_easm_real(self):
         """Actually initialize EASM controller (called from scan thread)."""
@@ -628,16 +631,16 @@ class WindowsScanner(Scanner):
             )
             self._easm_controller.start()
             self._easm_pending = False
-            print("[EASM] Enhanced Active Scan Mode INITIALIZED")
+            logger.info("EASM Enhanced Active Scan Mode INITIALIZED")
             return True
-            
+
         except ImportError as e:
-            print(f"[EASM] Failed to import EASM module: {e}")
+            logger.error(f"EASM failed to import EASM module: {e}")
             self._easm_enabled = False
             self._easm_pending = False
             return False
         except Exception as e:
-            print(f"[EASM] Failed to initialize: {e}")
+            logger.error(f"EASM failed to initialize: {e}")
             self._easm_enabled = False
             self._easm_pending = False
             return False
@@ -647,11 +650,19 @@ class WindowsScanner(Scanner):
         if self._easm_controller:
             self._easm_controller.stop()
             self._easm_controller = None
-            print("[EASM] Enhanced Active Scan Mode STOPPED")
+            logger.info("EASM Enhanced Active Scan Mode STOPPED")
     
     def _easm_log(self, level: str, message: str):
         """EASM logging callback."""
-        print(f"[EASM {level}] {message}")
+        level_upper = level.upper()
+        if level_upper == "ERROR":
+            logger.error(f"EASM: {message}")
+        elif level_upper in ("WARN", "WARNING"):
+            logger.warning(f"EASM: {message}")
+        elif level_upper == "DEBUG":
+            logger.debug(f"EASM: {message}")
+        else:
+            logger.info(f"EASM: {message}")
     
     def _run_easm_probes(self, base_networks: List[Network], timeout: float = 2.0) -> List[Dict]:
         """
@@ -683,12 +694,12 @@ class WindowsScanner(Scanner):
             
             # Collect discoveries
             easm_results = list(self._easm_discoveries)
-            
+
             if easm_results:
-                print(f"[EASM] Collected {len(easm_results)} discoveries this cycle")
-            
+                logger.info(f"EASM collected {len(easm_results)} discoveries this cycle")
+
         except Exception as e:
-            print(f"[EASM] Probe cycle error: {e}")
+            logger.error(f"EASM probe cycle error: {e}")
         
         return easm_results
     
@@ -730,7 +741,7 @@ class WindowsScanner(Scanner):
                         first_seen=existing.first_seen,
                         last_seen=existing.last_seen
                     )
-                    print(f"[EASM] Revealed hidden SSID: {ssid} ({bssid})")
+                    logger.info(f"EASM revealed hidden SSID: {ssid} ({bssid})")
             else:
                 # New network discovered via EASM
                 if bssid and ssid:
@@ -742,7 +753,7 @@ class WindowsScanner(Scanner):
                         security=SecurityType.UNKNOWN
                     )
                     network_map[bssid] = new_network
-                    print(f"[EASM] New network discovered: {ssid} ({bssid})")
+                    logger.info(f"EASM new network discovered: {ssid} ({bssid})")
         
         return list(network_map.values())
 
@@ -900,8 +911,8 @@ class WindowsScanner(Scanner):
                 ))
         
         except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
-            print(f"netsh scan error: {e}")
-        
+            logger.error(f"netsh scan error: {e}")
+
         return networks
     
     def _scan_scapy(self, timeout: float) -> List[Network]:
@@ -922,7 +933,7 @@ class WindowsScanner(Scanner):
         """
         # Try to initialize sniffer if needed
         if not self._init_scapy_sniffer():
-            print("[Scanner] Scapy sniffer unavailable, falling back to netsh")
+            logger.warning("Scapy sniffer unavailable, falling back to netsh")
             return self._scan_netsh()
         
         networks = []
@@ -1029,45 +1040,45 @@ class WindowsScanner(Scanner):
                             last_seen=datetime.now()
                         ))
             except Exception as e:
-                print(f"[Scanner] Packet handler error: {e}")
+                logger.error(f"Packet handler error: {e}")
         
         try:
             # Start sniffing in background thread
             if not self._scapy_sniffer.start_sniff(packet_handler, timeout=timeout):
-                print(f"[Scanner] Sniff failed: {self._scapy_sniffer.get_error()}")
+                logger.error(f"Sniff failed: {self._scapy_sniffer.get_error()}")
                 return self._scan_netsh()
-            
+
             # Wait for sniff to complete (with timeout protection)
             wait_start = time.time()
             while self._scapy_sniffer.is_running():
                 time.sleep(0.1)
                 if time.time() - wait_start > timeout + 2.0:
-                    print("[Scanner] Sniff timeout - stopping")
+                    logger.warning("Sniff timeout - stopping")
                     self._scapy_sniffer.stop()
                     break
-            
+
             # Merge any EASM discoveries
             networks = self._merge_easm_discoveries(networks, easm_enhanced_bssids)
-            
+
             # Log EASM stats
             if self._easm_enabled and self._easm_controller:
                 try:
                     stats = self._easm_controller.get_full_stats()
-                    print(f"[EASM] Scan complete: {stats['probes']['sent']} probes, "
+                    logger.info(f"EASM scan complete: {stats['probes']['sent']} probes, "
                           f"{stats['probes']['responses']} responses, "
                           f"{stats['hidden_ssids']['revealed']} hidden revealed")
                 except:
                     pass
-            
-            print(f"[Scanner] Scapy scan captured {len(networks)} networks")
-        
+
+            logger.info(f"Scapy scan captured {len(networks)} networks")
+
         except Exception as e:
-            print(f"[Scanner] Scapy scan error: {e}")
+            logger.error(f"Scapy scan error: {e}")
             return self._scan_netsh()
-        
+
         # If Scapy found nothing, fall back to netsh
         if not networks:
-            print("[Scanner] Scapy found no networks, trying netsh")
+            logger.info("Scapy found no networks, trying netsh")
             return self._scan_netsh()
         
         return networks
